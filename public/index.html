@@ -139,6 +139,7 @@ select.msel:focus{border-color:var(--gold);background-color:var(--white)}
 </div>
 <script>
 let meetings=[], selected=null, note='', email='';
+
 window.addEventListener('DOMContentLoaded', async () => {
   try {
     const r = await fetch('/api/health');
@@ -151,65 +152,66 @@ window.addEventListener('DOMContentLoaded', async () => {
     setBadge('cStatus','err','Server error');
   }
 });
+
 function setBadge(id,state,label){
   const el=document.getElementById(id);
   el.className='sbadge '+state;
   el.innerHTML=`<span class="sdot"></span>${label}`;
 }
+
 async function loadMeetings(){
   const sel=document.getElementById('msel'), rb=document.getElementById('rbtn');
   sel.innerHTML='<option value="">— Loading… —</option>';
   rb.disabled=true; rb.textContent='…';
   try {
-    const r = await fetch('/api/notion/v1/search', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
-        query:'',
-        filter:{value:'page',property:'object'},
-        sort:{direction:'descending',timestamp:'last_edited_time'},
-        page_size:30
-      })
-    });
+    const r = await fetch('/api/meetings');
     const d = await r.json();
-    meetings = (d.results||[]).filter(p=>getTitle(p).length>2);
+    if (d.error) throw new Error(d.error);
+    meetings = d.results || [];
     sel.innerHTML='<option value="">— Select a meeting —</option>';
     meetings.forEach((m,i)=>{
-      const t=getTitle(m);
-      const dt=new Date(m.last_edited_time).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
-      const o=document.createElement('option');
-      o.value=i; o.textContent=`${t}  (${dt})`; sel.appendChild(o);
+      const t = getTitle(m);
+      const dt = new Date(m.last_edited_time).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+      const o = document.createElement('option');
+      o.value = i;
+      o.textContent = `${t}  (${dt})`;
+      sel.appendChild(o);
     });
     rb.disabled=false; rb.textContent='↻';
   } catch(e){
-    sel.innerHTML='<option value="">— Error loading meetings —</option>';
+    sel.innerHTML='<option value="">— Error: '+e.message+' —</option>';
     rb.disabled=false; rb.textContent='↻';
+    setBadge('nStatus','err','Notion error');
   }
 }
+
 function getTitle(p){
-  try{
+  try {
     for(const k of Object.keys(p.properties||{})){
       const prop=p.properties[k];
-      if(prop.type==='title'&&prop.title?.length>0)
+      if(prop.type==='title' && prop.title?.length>0)
         return prop.title.map(t=>t.plain_text).join('');
     }
-    return 'Untitled';
-  }catch{return 'Untitled';}
+    return p.url || 'Untitled';
+  } catch { return 'Untitled'; }
 }
+
 function onSelect(){
   const sel=document.getElementById('msel');
   const info=document.getElementById('minfo');
-  if(!sel.value){info.classList.remove('on');selected=null;return;}
-  selected=meetings[parseInt(sel.value)];
-  const t=getTitle(selected);
-  const dt=new Date(selected.last_edited_time).toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'});
+  if(!sel.value){ info.classList.remove('on'); selected=null; return; }
+  selected = meetings[parseInt(sel.value)];
+  const t = getTitle(selected);
+  const dt = new Date(selected.last_edited_time).toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'});
   info.innerHTML=`<strong>${t}</strong> &nbsp;·&nbsp; ${dt} &nbsp;·&nbsp; <span style="color:var(--success)">✓ Ready</span>`;
   info.classList.add('on');
   resetOut();
 }
+
 async function getContent(id){
-  const r = await fetch(`/api/notion/v1/blocks/${id}/children?page_size=100`);
+  const r = await fetch(`/api/page/${id}`);
   const d = await r.json();
+  if(d.error) throw new Error(d.error);
   let text='';
   for(const b of d.results||[]){
     const t=b.type, bd=b[t];
@@ -225,6 +227,7 @@ async function getContent(id){
   }
   return text.trim();
 }
+
 async function process(){
   if(!selected){
     document.getElementById('msel').style.borderColor='#c0392b';
@@ -247,10 +250,7 @@ async function process(){
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ transcript, meetingTitle: title })
     });
-    if(!r.ok){
-      const e=await r.json();
-      throw new Error(e.error||'Processing failed');
-    }
+    if(!r.ok){ const e=await r.json(); throw new Error(e.error||'Processing failed'); }
     const data = await r.json();
     note = data.note || '';
     email = data.email || '';
@@ -270,21 +270,16 @@ async function process(){
     setTimeout(()=>{btn.classList.remove('errbtn');resetBtn();},5000);
   }
 }
+
 async function pushNotion(){
   if(!note||!selected) return;
   const badge=document.getElementById('nbadge');
   badge.textContent='Pushing…';
   try {
-    const lines=note.split('\n').filter(l=>l.trim());
-    const children=[
-      {object:'block',type:'divider',divider:{}},
-      {object:'block',type:'heading_2',heading_2:{rich_text:[{type:'text',text:{content:`Internal Note — ${new Date().toLocaleDateString()}`}}]}},
-      ...lines.map(l=>({object:'block',type:'paragraph',paragraph:{rich_text:[{type:'text',text:{content:l.substring(0,2000)}}]}}))
-    ];
-    const r = await fetch(`/api/notion/v1/blocks/${selected.id}/children`, {
-      method:'PATCH',
+    const r = await fetch(`/api/push/${selected.id}`, {
+      method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({children})
+      body: JSON.stringify({ note })
     });
     if(!r.ok) throw new Error('Push failed');
     badge.classList.add('sent'); badge.textContent='✓ Pushed to Notion';
@@ -293,6 +288,7 @@ async function pushNotion(){
     badge.style.color='var(--danger)';
   }
 }
+
 function cp(type){
   const text = type==='note' ? note : email;
   navigator.clipboard.writeText(text).then(()=>{
