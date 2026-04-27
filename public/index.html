@@ -166,16 +166,14 @@ async function loadMeetings(){
   try {
     const r = await fetch('/api/meetings');
     const d = await r.json();
-    if (d.error) throw new Error(d.error);
+    if(d.error) throw new Error(d.error);
     meetings = d.results || [];
     sel.innerHTML='<option value="">— Select a meeting —</option>';
     meetings.forEach((m,i)=>{
-      const t = getTitle(m);
-      const dt = new Date(m.last_edited_time).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
-      const o = document.createElement('option');
-      o.value = i;
-      o.textContent = `${t}  (${dt})`;
-      sel.appendChild(o);
+      const t=getTitle(m);
+      const dt=new Date(m.last_edited_time).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+      const o=document.createElement('option');
+      o.value=i; o.textContent=`${t}  (${dt})`; sel.appendChild(o);
     });
     rb.disabled=false; rb.textContent='↻';
   } catch(e){
@@ -186,47 +184,37 @@ async function loadMeetings(){
 }
 
 function getTitle(p){
-  try {
+  try{
     for(const k of Object.keys(p.properties||{})){
       const prop=p.properties[k];
-      if(prop.type==='title' && prop.title?.length>0)
+      if(prop.type==='title'&&prop.title?.length>0)
         return prop.title.map(t=>t.plain_text).join('');
     }
-    return p.url || 'Untitled';
-  } catch { return 'Untitled'; }
+    return 'Untitled';
+  }catch{return 'Untitled';}
 }
 
 function onSelect(){
   const sel=document.getElementById('msel');
   const info=document.getElementById('minfo');
-  if(!sel.value){ info.classList.remove('on'); selected=null; return; }
-  selected = meetings[parseInt(sel.value)];
-  const t = getTitle(selected);
-  const dt = new Date(selected.last_edited_time).toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'});
+  if(!sel.value){info.classList.remove('on');selected=null;return;}
+  selected=meetings[parseInt(sel.value)];
+  const t=getTitle(selected);
+  const dt=new Date(selected.last_edited_time).toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'});
   info.innerHTML=`<strong>${t}</strong> &nbsp;·&nbsp; ${dt} &nbsp;·&nbsp; <span style="color:var(--success)">✓ Ready</span>`;
   info.classList.add('on');
   resetOut();
 }
 
+// Fetches ALL content from the page — properties + body blocks
 async function getContent(id){
   const r = await fetch(`/api/page/${id}`);
   const d = await r.json();
   if(d.error) throw new Error(d.error);
-  let text='';
-  let text='';
-  for(const b of d.results||[]){
-    const t=b.type, bd=b[t];
-    if(!bd) continue;
-    let line='';
-    if(bd.rich_text) line=bd.rich_text.map(x=>x.plain_text).join('');
-    if(t==='heading_1') text+=`\n# ${line}\n`;
-    else if(t==='heading_2') text+=`\n## ${line}\n`;
-    else if(t==='heading_3') text+=`\n### ${line}\n`;
-    else if(t==='bulleted_list_item') text+=`• ${line}\n`;
-    else if(t==='numbered_list_item') text+=`${line}\n`;
-    else if(line) text+=line+'\n';
+  if(!d.content || d.content.length < 30){
+    throw new Error('This page appears to be empty or has very little content. Please add the transcript or notes to the Notion page first.');
   }
-  return text.trim();
+  return { content: d.content, title: d.title };
 }
 
 async function process(){
@@ -240,21 +228,25 @@ async function process(){
   document.getElementById('bm').innerHTML='<div class="spinner"></div> &nbsp;Processing';
   document.getElementById('bs').textContent='Fetching from Notion…';
   setDot('nd','proc'); setDot('ed','proc');
-  setBody('nb','<div class="empty"><div style="color:var(--gold);font-size:13px;font-weight:500">Pulling transcript from Notion…</div></div>');
+  setBody('nb','<div class="empty"><div style="color:var(--gold);font-size:13px;font-weight:500">Pulling all content from Notion…</div></div>');
   setBody('eb','<div class="empty"><div style="color:var(--gold);font-size:13px;font-weight:500">Preparing email draft…</div></div>');
+
   try {
-    const transcript = await getContent(selected.id);
-    const title = getTitle(selected);
+    // Get ALL content from the page (properties + body blocks + notes)
+    const { content, title } = await getContent(selected.id);
     document.getElementById('bs').textContent='Claude is reading…';
+
     const r = await fetch('/api/claude', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ transcript, meetingTitle: title })
+      body: JSON.stringify({ content, meetingTitle: title })
     });
     if(!r.ok){ const e=await r.json(); throw new Error(e.error||'Processing failed'); }
+
     const data = await r.json();
     note = data.note || '';
     email = data.email || '';
+
     setBody('nb',`<pre style="white-space:pre-wrap;font-family:'DM Sans',sans-serif;font-size:13px;line-height:1.8" class="fade-up">${esc(note)}</pre>`);
     setBody('eb',`<pre style="white-space:pre-wrap;font-family:'DM Sans',sans-serif;font-size:13px;line-height:1.8" class="fade-up">${esc(email)}</pre>`);
     setDot('nd','ready'); setDot('ed','ready');
@@ -262,13 +254,14 @@ async function process(){
     btn.disabled=false; btn.classList.add('done');
     document.getElementById('bm').textContent='✓  Done';
     document.getElementById('bs').textContent='Both outputs ready';
+
   } catch(e){
     btn.disabled=false; btn.classList.add('errbtn');
     document.getElementById('bm').textContent='✕ Error';
     document.getElementById('bs').textContent=e.message||'Something went wrong';
     setDot('nd','err'); setDot('ed','err');
     setBody('nb',`<div class="empty"><div style="color:var(--danger);font-size:13px;max-width:280px;text-align:center">${e.message}</div></div>`);
-    setTimeout(()=>{btn.classList.remove('errbtn');resetBtn();},5000);
+    setTimeout(()=>{btn.classList.remove('errbtn');resetBtn();},6000);
   }
 }
 
@@ -277,10 +270,10 @@ async function pushNotion(){
   const badge=document.getElementById('nbadge');
   badge.textContent='Pushing…';
   try {
-    const r = await fetch(`/api/push/${selected.id}`, {
+    const r = await fetch(`/api/push/${selected.id}`,{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ note })
+      body: JSON.stringify({note})
     });
     if(!r.ok) throw new Error('Push failed');
     badge.classList.add('sent'); badge.textContent='✓ Pushed to Notion';
@@ -291,28 +284,32 @@ async function pushNotion(){
 }
 
 function cp(type){
-  const text = type==='note' ? note : email;
+  const text=type==='note'?note:email;
   navigator.clipboard.writeText(text).then(()=>{
     const btn=event.target, orig=btn.textContent;
     btn.textContent='Copied!'; setTimeout(()=>btn.textContent=orig,1500);
   });
 }
+
 function cpGmail(){
   navigator.clipboard.writeText(email).then(()=>{
     const b=document.getElementById('gbadge');
     b.classList.add('sent'); b.textContent='✓ Copied for Gmail';
   });
 }
+
 function setDot(id,s){document.getElementById(id).className='sdot2 '+s;}
 function setBody(id,html){document.getElementById(id).innerHTML=html;}
 function show(id){document.getElementById(id).style.display='flex';}
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
 function resetBtn(){
   const btn=document.getElementById('pbtn');
   btn.disabled=false; btn.classList.remove('done','errbtn');
   document.getElementById('bm').textContent='✦  Process';
   document.getElementById('bs').textContent='Generate notes + email';
 }
+
 function resetOut(){
   note=''; email='';
   setDot('nd',''); setDot('ed','');
