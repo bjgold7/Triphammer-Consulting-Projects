@@ -13,7 +13,7 @@ const MEETINGS_DB_ID = 'd53b4292-935a-4b7b-bcbb-6052423d786c';
 
 // Triphammer Consulting — Meeting Processor
 
-// ── MEETINGS LIST — queries your specific Meeting Notes & Chat Logs database
+// ── MEETINGS LIST
 app.get('/api/meetings', async (req, res) => {
   try {
     const response = await fetch(`https://api.notion.com/v1/databases/${MEETINGS_DB_ID}/query`, {
@@ -37,26 +37,103 @@ app.get('/api/meetings', async (req, res) => {
   }
 });
 
-// ── PAGE CONTENT — fetches blocks from a specific page
+// ── PAGE CONTENT — reads EVERYTHING: properties + body blocks
 app.get('/api/page/:pageId', async (req, res) => {
   try {
-    const response = await fetch(`https://api.notion.com/v1/blocks/${req.params.pageId}/children?page_size=100`, {
-      method: 'GET',
+    // 1. Get page properties (database fields like Otter Summary, Notes, etc.)
+    const pageRes = await fetch(`https://api.notion.com/v1/pages/${req.params.pageId}`, {
       headers: {
         'Authorization': `Bearer ${NOTION_TOKEN}`,
         'Notion-Version': '2022-06-28'
       }
     });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.message || 'Notion error');
-    res.json(data);
+    const pageData = await pageRes.json();
+
+    // 2. Get page body blocks (freeform content, typed notes, etc.)
+    const blocksRes = await fetch(`https://api.notion.com/v1/blocks/${req.params.pageId}/children?page_size=100`, {
+      headers: {
+        'Authorization': `Bearer ${NOTION_TOKEN}`,
+        'Notion-Version': '2022-06-28'
+      }
+    });
+    const blocksData = await blocksRes.json();
+
+    // 3. Extract all text from properties
+    let content = '';
+    const props = pageData.properties || {};
+
+    for (const [key, prop] of Object.entries(props)) {
+      let value = '';
+
+      if (prop.type === 'title' && prop.title?.length > 0) {
+        value = prop.title.map(t => t.plain_text).join('');
+      } else if (prop.type === 'rich_text' && prop.rich_text?.length > 0) {
+        value = prop.rich_text.map(t => t.plain_text).join('');
+      } else if (prop.type === 'date' && prop.date?.start) {
+        value = prop.date.start;
+      } else if (prop.type === 'select' && prop.select?.name) {
+        value = prop.select.name;
+      } else if (prop.type === 'multi_select' && prop.multi_select?.length > 0) {
+        value = prop.multi_select.map(s => s.name).join(', ');
+      } else if (prop.type === 'number' && prop.number !== null) {
+        value = String(prop.number);
+      } else if (prop.type === 'checkbox') {
+        value = prop.checkbox ? 'Yes' : 'No';
+      } else if (prop.type === 'url' && prop.url) {
+        value = prop.url;
+      } else if (prop.type === 'email' && prop.email) {
+        value = prop.email;
+      } else if (prop.type === 'phone_number' && prop.phone_number) {
+        value = prop.phone_number;
+      }
+
+      if (value && value.trim().length > 0) {
+        content += `[${key}]: ${value}\n`;
+      }
+    }
+
+    // 4. Extract all text from body blocks
+    const blocks = blocksData.results || [];
+    if (blocks.length > 0) {
+      content += '\n[Meeting Notes / Transcript]\n';
+      for (const b of blocks) {
+        const t = b.type;
+        const bd = b[t];
+        if (!bd) continue;
+        let line = '';
+        if (bd.rich_text) line = bd.rich_text.map(x => x.plain_text).join('');
+        if (!line.trim()) continue;
+        if (t === 'heading_1') content += `\n# ${line}\n`;
+        else if (t === 'heading_2') content += `\n## ${line}\n`;
+        else if (t === 'heading_3') content += `\n### ${line}\n`;
+        else if (t === 'bulleted_list_item') content += `• ${line}\n`;
+        else if (t === 'numbered_list_item') content += `${line}\n`;
+        else if (t === 'quote') content += `> ${line}\n`;
+        else if (t === 'callout') content += `[Note] ${line}\n`;
+        else content += `${line}\n`;
+      }
+    }
+
+    res.json({ content: content.trim(), title: getPageTitle(pageData) });
+
   } catch (err) {
     console.error('Page content error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── PUSH NOTE TO NOTION — appends internal note to a page
+function getPageTitle(pageData) {
+  try {
+    for (const prop of Object.values(pageData.properties || {})) {
+      if (prop.type === 'title' && prop.title?.length > 0) {
+        return prop.title.map(t => t.plain_text).join('');
+      }
+    }
+    return 'Untitled';
+  } catch { return 'Untitled'; }
+}
+
+// ── PUSH NOTE TO NOTION
 app.post('/api/push/:pageId', async (req, res) => {
   const { note } = req.body;
   if (!note) return res.status(400).json({ error: 'No note content provided' });
@@ -91,18 +168,20 @@ app.post('/api/push/:pageId', async (req, res) => {
   }
 });
 
-// ── CLAUDE — generates internal note + parent email from transcript
+// ── CLAUDE — generates internal note + parent email from ALL page content
 app.post('/api/claude', async (req, res) => {
-  const { transcript, meetingTitle } = req.body;
-  if (!transcript || transcript.length < 30) {
-    return res.status(400).json({ error: 'Transcript is empty or too short. Please paste the transcript into the Notion page first.' });
+  const { content, meetingTitle } = req.body;
+  if (!content || content.length < 30) {
+    return res.status(400).json({ error: 'This page appears to be empty. Please make sure the meeting notes or transcript are saved in Notion first.' });
   }
 
   const systemPrompt = `You are an expert college admissions consultant's assistant for Triphammer Consulting, run by Brent Goldman (formerly 20+ years in finance, now college counseling with Emily).
 
-Generate two outputs from meeting transcripts:
+You will receive ALL content from a Notion meeting page — this may include database property fields (like Otter Summary, Meeting Transcript, Notes, AI Summary), freeform typed notes, and any other content Brent has added. Some fields may be empty. Use everything available to produce the best possible outputs.
 
-1. INTERNAL NOTE: A structured, detailed note for Brent's records. Include sections for:
+Generate two outputs:
+
+1. INTERNAL NOTE: A structured, detailed note for Brent's records. Synthesize ALL available information — don't just summarize the transcript, incorporate any handwritten notes, summaries, or other context. Include:
    - Student Profile (name, grade, school, key stats)
    - Academics (GPA, courses, testing)
    - Athletics (if relevant)
@@ -118,7 +197,7 @@ Generate two outputs from meeting transcripts:
    - Conversational but professional tone
    - Formatted for direct Gmail copy-paste
 
-Respond in EXACTLY this format with no extra text before or after:
+Respond in EXACTLY this format:
 ===NOTE===
 [internal note content]
 ===EMAIL===
@@ -136,7 +215,7 @@ Respond in EXACTLY this format with no extra text before or after:
         model: 'claude-sonnet-4-20250514',
         max_tokens: 4000,
         system: systemPrompt,
-        messages: [{ role: 'user', content: `Meeting title: ${meetingTitle}\n\nTranscript:\n${transcript}` }]
+        messages: [{ role: 'user', content: `Meeting: ${meetingTitle}\n\n${content}` }]
       })
     });
 
