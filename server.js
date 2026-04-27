@@ -40,7 +40,6 @@ app.get('/api/meetings', async (req, res) => {
 // ── PAGE CONTENT — reads EVERYTHING: properties + body blocks
 app.get('/api/page/:pageId', async (req, res) => {
   try {
-    // 1. Get page properties (database fields like Otter Summary, Notes, etc.)
     const pageRes = await fetch(`https://api.notion.com/v1/pages/${req.params.pageId}`, {
       headers: {
         'Authorization': `Bearer ${NOTION_TOKEN}`,
@@ -49,7 +48,6 @@ app.get('/api/page/:pageId', async (req, res) => {
     });
     const pageData = await pageRes.json();
 
-    // 2. Get page body blocks (freeform content, typed notes, etc.)
     const blocksRes = await fetch(`https://api.notion.com/v1/blocks/${req.params.pageId}/children?page_size=100`, {
       headers: {
         'Authorization': `Bearer ${NOTION_TOKEN}`,
@@ -58,13 +56,11 @@ app.get('/api/page/:pageId', async (req, res) => {
     });
     const blocksData = await blocksRes.json();
 
-    // 3. Extract all text from properties
     let content = '';
     const props = pageData.properties || {};
 
     for (const [key, prop] of Object.entries(props)) {
       let value = '';
-
       if (prop.type === 'title' && prop.title?.length > 0) {
         value = prop.title.map(t => t.plain_text).join('');
       } else if (prop.type === 'rich_text' && prop.rich_text?.length > 0) {
@@ -86,13 +82,11 @@ app.get('/api/page/:pageId', async (req, res) => {
       } else if (prop.type === 'phone_number' && prop.phone_number) {
         value = prop.phone_number;
       }
-
       if (value && value.trim().length > 0) {
         content += `[${key}]: ${value}\n`;
       }
     }
 
-    // 4. Extract all text from body blocks
     const blocks = blocksData.results || [];
     if (blocks.length > 0) {
       content += '\n[Meeting Notes / Transcript]\n';
@@ -172,7 +166,7 @@ app.post('/api/push/:pageId', async (req, res) => {
 app.post('/api/claude', async (req, res) => {
   const { content, meetingTitle } = req.body;
   if (!content || content.length < 30) {
-    return res.status(400).json({ error: 'This page appears to be empty. Please make sure the meeting notes or transcript are saved in Notion first.' });
+    return res.status(400).json({ error: 'This page appears to be empty. Please make sure meeting notes or a transcript are saved in Notion first.' });
   }
 
   const systemPrompt = `You are an expert college admissions consultant's assistant for Triphammer Consulting, run by Brent Goldman (formerly 20+ years in finance, now college counseling with Emily).
@@ -181,7 +175,7 @@ You will receive ALL content from a Notion meeting page — this may include dat
 
 Generate two outputs:
 
-1. INTERNAL NOTE: A structured, detailed note for Brent's records. Synthesize ALL available information — don't just summarize the transcript, incorporate any handwritten notes, summaries, or other context. Include:
+1. INTERNAL NOTE: A structured, detailed note for Brent's records. Synthesize ALL available information. Include:
    - Student Profile (name, grade, school, key stats)
    - Academics (GPA, courses, testing)
    - Athletics (if relevant)
@@ -212,7 +206,7 @@ Respond in EXACTLY this format:
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-opus-4-5-20251101',
         max_tokens: 4000,
         system: systemPrompt,
         messages: [{ role: 'user', content: `Meeting: ${meetingTitle}\n\n${content}` }]
