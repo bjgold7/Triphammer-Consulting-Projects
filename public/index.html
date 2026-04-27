@@ -213,6 +213,7 @@ async function getContent(id){
   const d = await r.json();
   if(d.error) throw new Error(d.error);
   let text='';
+  let text='';
   for(const b of d.results||[]){
     const t=b.type, bd=b[t];
     if(!bd) continue;
